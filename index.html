@@ -1,0 +1,280 @@
+/*
+ * app.jsx
+ * --------
+ * React + Tailwind + Recharts 로 구성된 하이브리드 EV 파워트레인 +
+ * 회생 서스펜션 시뮬레이터 대시보드. Flask 의 /api/simulate, /api/history,
+ * /api/reset 과 통신한다.
+ */
+const { useState, useEffect, useRef } = React;
+const {
+  LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend
+} = Recharts;
+
+const DRIVE_CITY = "City Driving (F1 Nano Active)";
+const DRIVE_HWY  = "Highway Cruising (Commercial Active)";
+const ROAD_BUMP  = "Speed Bump (Pulse hit)";
+const ROAD_FLAT  = "Flat Road";
+
+/* ============================================================
+ * [주석 요구사항 ③] 조건부 렌더링으로 F1-하이브리드 스위칭 상태를 시각화
+ * ------------------------------------------------------------
+ * - driveMode(City/F1-Nano vs Highway/Commercial) 와 road(Bump/Flat)
+ *   두 축의 조합(2x2)에 따라 SVG 안의 색상/애니메이션/텍스트가 전부
+ *   분기된다.
+ * - City + Bump(F1 나노 활성)  : MOSFET 게이트가 "ON"으로 켜지고, 이온이
+ *   나노버퍼로 매끄럽게 분산되어 빨강 플래시가 거의 없다.
+ * - Highway + Bump(상용셀 미스매치) : 게이트가 닫힌 채 이온이 배터리
+ *   입구에서 병목(농도분극) → 빨강 플래시 강하게 깜빡임 (고손실 시각화).
+ * - Flat + Highway(정속 적합) : 안정적인 녹색 흐름, 피스톤 진동도 느려짐.
+ * - Flat + City(F1 나노, 비효율) : 보통 흐름이지만 나노버퍼 강조가 옅음.
+ * ============================================================ */
+function PowertrainSVG({ driveMode, road }) {
+  const isNanoCity = driveMode === DRIVE_CITY;
+  const isBump = road === ROAD_BUMP;
+
+  // 미스매치 상황: 범프인데 상용(고속도로) 셀을 쓰는 경우 → 병목 발생
+  const isMismatch = isBump && !isNanoCity;
+  // F1 나노가 범프를 제대로 흡수하는 "베스트 케이스"
+  const isBestCase = isBump && isNanoCity;
+
+  const mosfetOpen = isNanoCity; // F1 나노 모드일 때만 MOSFET 게이트 ON
+  const pistonClass = isBump ? "piston-anim-fast" : "piston-anim";
+
+  const ions = Array.from({ length: 14 }, (_, i) => i);
+
+  return (
+    <svg viewBox="0 0 400 260" className="w-full h-72 bg-slate-950 rounded-xl border border-slate-800">
+      <rect x="40" y="20" width="320" height="30" rx="6" fill="#1e293b" stroke="#334155"/>
+      <text x="200" y="40" textAnchor="middle" className="fill-slate-400" fontSize="11">CHASSIS</text>
+
+      <g className={pistonClass}>
+        <rect x="185" y="55" width="30" height="80" fill="#22d3ee" opacity=".8"/>
+        <rect x="170" y="130" width="60" height="14" fill="#0891b2"/>
+      </g>
+
+      <g stroke="#22d3ee" fill="none" strokeWidth="2">
+        {[0,1,2,3,4].map(i => (
+          <ellipse key={i} cx="200" cy={155 + i*10} rx="40" ry="5"/>
+        ))}
+      </g>
+
+      {/* MOSFET 게이트: F1 나노 모드(City)일 때만 ON */}
+      <g transform="translate(280,160)">
+        <rect x="0" y="0" width="40" height="30" fill={mosfetOpen ? "#34d399" : "#475569"} opacity=".7"/>
+        <text x="20" y="19" textAnchor="middle" fontSize="9" className="fill-slate-900 font-bold">
+          {mosfetOpen ? "MOSFET ON" : "GATE OFF"}
+        </text>
+      </g>
+
+      {/* 상용 대용량 배터리 (Highway 전용 셀) */}
+      <rect x="60" y="200" width="120" height="40" fill="#1e293b" stroke="#22d3ee"
+            opacity={driveMode === DRIVE_HWY ? 1 : 0.4}/>
+      <text x="120" y="225" textAnchor="middle" fontSize="10" className="fill-cyan-300">
+        COMMERCIAL CELL
+      </text>
+
+      {/* F1 나노 배터리 (City 전용 셀) */}
+      <rect x="240" y="200" width="120" height="40" fill="#064e3b" stroke="#34d399"
+            opacity={isNanoCity ? 1 : 0.25}/>
+      <text x="300" y="225" textAnchor="middle" fontSize="10" className="fill-emerald-300">
+        F1 NANO CELL
+      </text>
+
+      {/* 이온 도트: 병목/분산 여부에 따라 색/애니메이션 분기 */}
+      {ions.map(i => {
+        const goNano = isNanoCity && i % 2 === 0;
+        const cy = goNano ? 210 : 205;
+        const fill = isMismatch ? "#ef4444" : (goNano ? "#34d399" : "#22d3ee");
+        const cls  = isMismatch ? "flash-red" : "ion-flow";
+        return <circle key={i} cx={goNano ? 300 : 120 + (i%4)*4} cy={cy} r="3"
+                       fill={fill} className={cls}/>;
+      })}
+
+      {/* 베스트 케이스 강조 라벨 */}
+      {isBestCase && (
+        <text x="200" y="65" textAnchor="middle" fontSize="10" className="fill-emerald-300 font-bold">
+          NANO ABSORBING SPIKE ✓
+        </text>
+      )}
+      {isMismatch && (
+        <text x="200" y="65" textAnchor="middle" fontSize="10" className="fill-red-400 font-bold">
+          CONCENTRATION-POLARIZATION BOTTLENECK
+        </text>
+      )}
+    </svg>
+  );
+}
+
+function App() {
+  const [driveMode, setDriveMode] = useState(DRIVE_CITY);
+  const [road, setRoad] = useState(ROAD_BUMP);
+  const [v, setV] = useState(2.0);
+  const [N, setN] = useState(150);
+  const [R, setR] = useState(1.0);
+  const [result, setResult] = useState(null);
+  const [series, setSeries] = useState([]);
+  const [history, setHistory] = useState([]);
+  const tickRef = useRef(0);
+
+  // 슬라이더/모드 변경 시 백엔드 호출 (debounce)
+  useEffect(() => {
+    const id = setTimeout(async () => {
+      const res = await fetch("/api/simulate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ driveMode, roadCondition: road, v, N, R }),
+      });
+      const data = await res.json();
+      setResult(data);
+      tickRef.current += 1;
+      setSeries(s => [...s.slice(-29), {
+        t: tickRef.current,
+        순회수에너지: data.netEnergy,
+        손실: data.loss,
+        주행거리연장: data.rangeExtensionKm,
+      }]);
+      loadHistory();
+    }, 250);
+    return () => clearTimeout(id);
+  }, [driveMode, road, v, N, R]);
+
+  async function loadHistory() {
+    const r = await fetch("/api/history");
+    setHistory(await r.json());
+  }
+  useEffect(() => { loadHistory(); }, []);
+
+  async function handleReset() {
+    await fetch("/api/reset", { method: "POST" });
+    tickRef.current = 0;
+    setSeries([]);
+    setResult(null);
+    loadHistory();
+  }
+
+  const eff   = result?.efficiency ?? 0;
+  const loss  = result?.loss ?? 0;
+  const range = result?.rangeExtensionKm ?? 0;
+  const tempRisk = loss > 300 ? "HIGH" : loss > 100 ? "MED" : "LOW";
+
+  return (
+    <div className="min-h-screen p-6 max-w-7xl mx-auto">
+      <header className="mb-6">
+        <h1 className="text-2xl font-bold neon-cyan">
+          ⚡ Hybrid EV Powertrain × Electromagnetic Regenerative Suspension
+        </h1>
+        <p className="text-slate-400 text-sm">
+          F1 나노배터리(킥 에너지 흡수) + 상용 대용량 배터리(정속 주행) 하이브리드 자가충전 시뮬레이터
+        </p>
+      </header>
+
+      <div className="grid grid-cols-12 gap-4">
+        <aside className="col-span-12 lg:col-span-3 bg-slate-800/60 p-4 rounded-xl space-y-4 border border-slate-700">
+          <div>
+            <h3 className="text-sm font-semibold mb-2 text-cyan-300">DRIVE MODE</h3>
+            {[DRIVE_CITY, DRIVE_HWY].map(m => (
+              <button key={m} onClick={() => setDriveMode(m)}
+                className={`w-full mb-1 text-xs py-1.5 rounded ${driveMode===m?"bg-cyan-500 text-slate-900 font-bold":"bg-slate-700"}`}>
+                {m}
+              </button>
+            ))}
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold mb-2 text-amber-300">ROAD CONDITION</h3>
+            {[ROAD_BUMP, ROAD_FLAT].map(r => (
+              <button key={r} onClick={() => setRoad(r)}
+                className={`w-full mb-1 text-xs py-1.5 rounded ${road===r?"bg-amber-400 text-slate-900 font-bold":"bg-slate-700"}`}>
+                {r}
+              </button>
+            ))}
+          </div>
+          <Slider label={`v (피스톤 속도): ${v} m/s`} min={0.1} max={5} step={0.1} value={v} onChange={setV}/>
+          <Slider label={`N (코일 턴수): ${N}`} min={10} max={500} step={10} value={N} onChange={setN}/>
+          <Slider label={`R (내부 저항): ${R} Ω`} min={0.1} max={10} step={0.1} value={R} onChange={setR}/>
+          <button onClick={handleReset}
+            className="w-full text-xs py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-300">
+            세션 초기화 (누적 그래프 리셋)
+          </button>
+        </aside>
+
+        <main className="col-span-12 lg:col-span-6 space-y-4">
+          <PowertrainSVG driveMode={driveMode} road={road}/>
+          <div className="grid grid-cols-3 gap-3">
+            <KPI title="Regen Efficiency" value={`${eff.toFixed(1)}%`} cls="neon-emerald"/>
+            <KPI title="Joule Heat Lost" value={`${loss.toFixed(1)} W`}
+                 cls={tempRisk==="HIGH"?"neon-red":tempRisk==="MED"?"neon-amber":"neon-emerald"}/>
+            <KPI title="Range Extension" value={`${range.toFixed(2)} km`} cls="neon-cyan"/>
+          </div>
+        </main>
+
+        <section className="col-span-12 lg:col-span-3 bg-slate-800/60 p-3 rounded-xl border border-slate-700">
+          <h3 className="text-sm font-semibold text-cyan-300 mb-2">누적 회수 에너지 / 주행거리 트렌드</h3>
+          <div style={{width:"100%",height:240}}>
+            <ResponsiveContainer>
+              <LineChart data={series}>
+                <CartesianGrid stroke="#334155" strokeDasharray="3 3"/>
+                <XAxis dataKey="t" stroke="#94a3b8" fontSize={10}/>
+                <YAxis stroke="#94a3b8" fontSize={10}/>
+                <Tooltip contentStyle={{background:"#0f172a",border:"1px solid #334155"}}/>
+                <Legend wrapperStyle={{fontSize:11}}/>
+                <Line dataKey="주행거리연장" stroke="#22d3ee" dot={false}/>
+                <Line dataKey="순회수에너지" stroke="#34d399" dot={false}/>
+                <Line dataKey="손실" stroke="#fbbf24" dot={false}/>
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </section>
+      </div>
+
+      <section className="mt-6 bg-slate-800/60 p-4 rounded-xl border border-slate-700">
+        <h3 className="text-sm font-semibold text-emerald-300 mb-2">📜 Past Simulation Logs (SQLite)</h3>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="text-slate-400 border-b border-slate-700">
+              <tr>{["ID","Time","Drive Mode","Road","v","N","R","V","Loss","NetE(W)","Eff%"].map(h=>
+                <th key={h} className="py-1.5 text-left px-2">{h}</th>)}</tr>
+            </thead>
+            <tbody>
+              {history.map(r=>(
+                <tr key={r.id} className="border-b border-slate-800 hover:bg-slate-700/30">
+                  <td className="px-2 py-1">{r.id}</td>
+                  <td className="px-2 py-1">{r.timestamp}</td>
+                  <td className="px-2 py-1 text-cyan-300">{r.driveMode}</td>
+                  <td className="px-2 py-1 text-amber-300">{r.roadCondition}</td>
+                  <td className="px-2 py-1">{r.v}</td>
+                  <td className="px-2 py-1">{r.N}</td>
+                  <td className="px-2 py-1">{r.R}</td>
+                  <td className="px-2 py-1">{r.voltage}</td>
+                  <td className="px-2 py-1 text-amber-300">{r.loss}</td>
+                  <td className="px-2 py-1 text-emerald-300">{r.netEnergy}</td>
+                  <td className="px-2 py-1 text-emerald-300">{r.efficiency}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function Slider({label,min,max,step,value,onChange}){
+  return (
+    <label className="block text-xs text-slate-300">
+      <div className="mb-1">{label}</div>
+      <input type="range" min={min} max={max} step={step} value={value}
+             onChange={e=>onChange(parseFloat(e.target.value))}
+             className="w-full accent-cyan-400"/>
+    </label>
+  );
+}
+function KPI({title,value,cls}){
+  return (
+    <div className="bg-slate-800/60 border border-slate-700 rounded-xl p-3">
+      <div className="text-[10px] uppercase text-slate-400">{title}</div>
+      <div className={`text-2xl font-bold mt-1 ${cls}`}>{value}</div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
